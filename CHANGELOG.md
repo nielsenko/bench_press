@@ -47,6 +47,12 @@
   matrix axis) are a compile error with hooks in the graph, since
   `dart build cli` takes none.
 
+- The compilation cache now covers the sources of path dependencies: a cached
+  AOT, WebAssembly or JavaScript artifact is rebuilt when a `.dart` file under
+  `lib/` of any package outside the pub cache changes. Before, an edit to a path
+  dependency left the cached artifact in place, and the run measured the old
+  code.
+
 ## 0.4.2
 
 - Added opt-in practical-significance and Schuirmann TOST equivalence gating

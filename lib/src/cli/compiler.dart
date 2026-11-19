@@ -320,6 +320,14 @@ require($encodedCompiledFile);
     };
     _collectDartFiles(Directory(p.join(baseDir, 'lib')), dartFiles);
     _collectDartFiles(sourceFile.parent, dartFiles);
+    // The sources of path dependencies change in place, as the benchmark's
+    // own do. A package in the pub cache changes only with the package
+    // configuration.
+    final roots = _packageRoots(_packageConfigPath(workingDirectory));
+    for (final root in roots.values) {
+      if (_isInPubCache(root)) continue;
+      _collectDartFiles(Directory(p.join(root, 'lib')), dartFiles);
+    }
 
     final sortedPaths = dartFiles.keys.toList()..sort();
     for (final path in sortedPaths) {
@@ -345,18 +353,35 @@ require($encodedCompiledFile);
   /// Empty when the file is missing or is not a package configuration.
   @visibleForTesting
   static List<String> packagesWithHooks(String packageConfigPath) {
+    final hooked = <String>[];
+    for (final MapEntry(key: name, value: root) in _packageRoots(
+      packageConfigPath,
+    ).entries) {
+      if (File(p.join(root, 'hook', 'build.dart')).existsSync() ||
+          File(p.join(root, 'hook', 'link.dart')).existsSync()) {
+        hooked.add(name);
+      }
+    }
+    return hooked..sort();
+  }
+
+  /// The root directory of every package in the package configuration at
+  /// [packageConfigPath], by package name.
+  ///
+  /// Empty when the file is missing or is not a package configuration.
+  static Map<String, String> _packageRoots(String packageConfigPath) {
     final file = File(packageConfigPath);
-    if (!file.existsSync()) return const [];
+    if (!file.existsSync()) return const {};
     final Object? config;
     try {
       config = jsonDecode(file.readAsStringSync());
     } on FormatException {
-      return const [];
+      return const {};
     }
-    if (config is! Map<String, Object?>) return const [];
+    if (config is! Map<String, Object?>) return const {};
     final packages = config['packages'];
-    if (packages is! List<Object?>) return const [];
-    final hooked = <String>[];
+    if (packages is! List<Object?>) return const {};
+    final roots = <String, String>{};
     for (final package in packages) {
       if (package is! Map<String, Object?>) continue;
       final name = package['name'];
@@ -367,13 +392,36 @@ require($encodedCompiledFile);
         rootUri.endsWith('/') ? rootUri : '$rootUri/',
       );
       if (root.scheme != 'file') continue;
-      final hooks = Directory.fromUri(root.resolve('hook/'));
-      if (File(p.join(hooks.path, 'build.dart')).existsSync() ||
-          File(p.join(hooks.path, 'link.dart')).existsSync()) {
-        hooked.add(name);
+      roots[name] = p.normalize(root.toFilePath());
+    }
+    return roots;
+  }
+
+  /// Whether [path] lies in a pub cache: under `PUB_CACHE`, or under a
+  /// directory with one of the names a pub cache has (`.pub-cache`,
+  /// `pub_cache`, `Pub\Cache`).
+  static bool _isInPubCache(String path) {
+    final configured = Platform.environment['PUB_CACHE'];
+    if (configured != null &&
+        configured.isNotEmpty &&
+        p.isWithin(configured, path)) {
+      return true;
+    }
+    final segments = [for (final s in p.split(path)) s.toLowerCase()];
+    for (var i = 0; i < segments.length; i++) {
+      final segment = segments[i];
+      if (segment == '.pub-cache' ||
+          segment == 'pub_cache' ||
+          segment == 'pub-cache') {
+        return true;
+      }
+      if (segment == 'pub' &&
+          i + 1 < segments.length &&
+          segments[i + 1] == 'cache') {
+        return true;
       }
     }
-    return hooked..sort();
+    return false;
   }
 
   void _collectDartFiles(Directory dir, Map<String, File> out) {
