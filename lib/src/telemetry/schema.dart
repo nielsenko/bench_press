@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../counters/counter_samples.dart';
 import '../runner.dart';
 import '../stats/metrics.dart';
 import '../throughput.dart';
@@ -175,6 +176,10 @@ final class const BenchmarkEntry({
   /// Per-process raw trial sample latencies in nanoseconds when
   /// [processes] > 1.
   final List<List<double>> processTrialsNs = const [],
+
+  /// Instructions retired and CPU cycles per operation, or null where the
+  /// run had no hardware counters.
+  final CounterSamples? counters,
 }) {
   /// Returns the statistically independent top-level samples for confidence
   /// interval estimation: [processMeansNs] when [processes] > 1 (hierarchical
@@ -232,6 +237,7 @@ final class const BenchmarkEntry({
       processes: processes,
       processMeansNs: processMeansNs,
       processTrialsNs: processTrialsNs,
+      counters: counters,
     );
   }
 
@@ -265,6 +271,7 @@ final class const BenchmarkEntry({
       coordinates: BenchmarkCoordinates(coordinates),
       isBaseline: result.isBaseline,
       throughput: result.throughput,
+      counters: result.counters,
     );
   }
 
@@ -321,6 +328,9 @@ final class const BenchmarkEntry({
       processes: processEntries.length,
       processMeansNs: processMeans,
       processTrialsNs: processTrials,
+      counters: CounterSamples.fromProcesses([
+        for (final e in processEntries) e.counters,
+      ]),
     );
   }
 
@@ -372,6 +382,7 @@ final class const BenchmarkEntry({
     if (processes > 1) 'processes': processes,
     if (processMeansNs.isNotEmpty) 'process_means_ns': processMeansNs,
     if (processTrialsNs.isNotEmpty) 'process_trials_ns': processTrialsNs,
+    if (counters != null) 'counters': counters!.toJson(),
     if (warmup != null) 'warmup': warmup,
     if (calibratedBatchIterations != null)
       'calibrated_batch_iterations': calibratedBatchIterations,
@@ -440,8 +451,19 @@ final class const BenchmarkEntry({
       processes: processes,
       processMeansNs: processMeans,
       processTrialsNs: processTrials,
+      counters: _parseCounters(json['counters'], rawName),
     );
   }
+
+  static CounterSamples? _parseCounters(Object? value, String name) =>
+      switch (value) {
+        null => null,
+        final Map<String, Object?> m => CounterSamples.fromJson(m),
+        final other => throw FormatException(
+          'Invalid "counters" in benchmark "$name": expected Map, '
+          'got ${other.runtimeType}',
+        ),
+      };
 
   static String _parseMode(Object? value, String name) => switch (value) {
     null => 'sync',
