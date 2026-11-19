@@ -8,6 +8,15 @@
   target, and only after an even number of visits so the `ABBA` drift
   cancellation holds. The default stays fixed-count.
 
+- Added `PerfCounters` and `CounterReading` (exported from
+  `package:bench_press/bench_press.dart`), the instructions retired and CPU
+  cycles of this process or of others, read in-process through `dart:ffi`:
+  `proc_pid_rusage` on macOS (user and kernel mode together, no privilege) and
+  `perf_event_open` on Linux (user mode on every thread, kernel mode apart with
+  `kernel: true`). `PerfCounters.open` returns `null`, with the reason passed to
+  `onUnavailable`, where the machine exposes no PMU, the process lacks the
+  permission, or the target is JavaScript or WebAssembly.
+
 ## 0.4.2
 
 - Added opt-in practical-significance and Schuirmann TOST equivalence gating
