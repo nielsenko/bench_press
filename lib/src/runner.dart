@@ -4,9 +4,9 @@ import 'dart:math' as math;
 import 'package:meta/meta.dart';
 
 import 'batch_runner.dart';
-import 'blackhole.dart';
 import 'calibration.dart';
 import 'config.dart';
+import 'counters/counter_samples.dart';
 import 'harness.dart';
 import 'stats/fieller.dart';
 import 'stats/metrics.dart';
@@ -45,6 +45,10 @@ final class const BenchmarkResult({
 
   /// The execution mode ('sync' or 'async').
   final String mode = 'sync',
+
+  /// Instructions retired and CPU cycles per operation, one sample per trial,
+  /// or null where the machine gives no hardware counters.
+  final CounterSamples? counters,
 }) {
   /// Converts the benchmark result to a canonical JSON representation.
   Map<String, Object?> toJson() => {
@@ -65,6 +69,7 @@ final class const BenchmarkResult({
     },
     'samples': rawTrialLatenciesNs.length,
     'raw_trials_ns': rawTrialLatenciesNs,
+    if (counters != null) 'counters': counters!.toJson(),
     'calibrated_batch_iterations': calibratedBatch.iterations,
   };
 
@@ -121,6 +126,7 @@ abstract final class BenchmarkRunner() {
       _logRecalibrationSwing(provisional, calibrated, config);
 
       final trials = <double>[];
+      final counted = _CounterTrials();
       while (trials.length < config.trials &&
           !_hasTightInterval(trials, config)) {
         final measurement = (runBatch ?? BatchRunner.runSync)(
@@ -128,6 +134,7 @@ abstract final class BenchmarkRunner() {
           calibrated.iterations,
         );
         trials.add(measurement.perOpNanoseconds);
+        counted.add(measurement);
       }
 
       if (_shouldScaleTrials(trials, config)) {
@@ -141,6 +148,7 @@ abstract final class BenchmarkRunner() {
             calibrated.iterations,
           );
           trials.add(measurement.perOpNanoseconds);
+          counted.add(measurement);
         }
       }
 
@@ -159,6 +167,7 @@ abstract final class BenchmarkRunner() {
         group: benchmark.group,
         isBaseline: benchmark.isBaseline,
         throughput: benchmark.throughput,
+        counters: counted.finish(trials.length),
       );
     } finally {
       benchmark.teardown();
@@ -208,6 +217,7 @@ abstract final class BenchmarkRunner() {
       _logRecalibrationSwing(provisional, calibrated, config);
 
       final trials = <double>[];
+      final counted = _CounterTrials();
       while (trials.length < config.trials &&
           !_hasTightInterval(trials, config)) {
         final measurement = await (runBatch ?? BatchRunner.runAsync)(
@@ -215,6 +225,7 @@ abstract final class BenchmarkRunner() {
           calibrated.iterations,
         );
         trials.add(measurement.perOpNanoseconds);
+        counted.add(measurement);
       }
 
       if (_shouldScaleTrials(trials, config)) {
@@ -228,6 +239,7 @@ abstract final class BenchmarkRunner() {
             calibrated.iterations,
           );
           trials.add(measurement.perOpNanoseconds);
+          counted.add(measurement);
         }
       }
 
@@ -247,6 +259,7 @@ abstract final class BenchmarkRunner() {
         group: benchmark.group,
         isBaseline: benchmark.isBaseline,
         throughput: benchmark.throughput,
+        counters: counted.finish(trials.length),
       );
     } finally {
       await benchmark.teardown();
@@ -332,6 +345,7 @@ abstract final class BenchmarkRunner() {
       warmupResult: warmupResult,
       calibrated: calibrated,
       trials: <double>[],
+      counters: _CounterTrials(),
     );
   }
 
@@ -345,12 +359,12 @@ abstract final class BenchmarkRunner() {
     final warmupStopwatch = Stopwatch()..start();
 
     while (true) {
-      final perOpNs = await _measureVariantBatch(
+      final measurement = await _measureVariantBatch(
         variant,
         iterations,
         isAsync: isAsync,
       );
-      warmupDetector.addSample(perOpNs);
+      warmupDetector.addSample(measurement.perOpNanoseconds);
 
       final elapsedSec = warmupStopwatch.elapsedMicroseconds / 1000000.0;
       if (warmupDetector.isDone(elapsedSeconds: elapsedSec)) {
@@ -441,13 +455,13 @@ abstract final class BenchmarkRunner() {
         }
       }
       for (var k = 0; k < remaining; k++) {
-        item.trials.add(
-          await _measureVariantBatch(
-            item.variant,
-            item.calibrated.iterations,
-            isAsync: item.isAsync,
-          ),
+        final measurement = await _measureVariantBatch(
+          item.variant,
+          item.calibrated.iterations,
+          isAsync: item.isAsync,
         );
+        item.trials.add(measurement.perOpNanoseconds);
+        item.counters.add(measurement);
       }
       last = item;
     }
@@ -499,6 +513,7 @@ abstract final class BenchmarkRunner() {
       group: item.variant.group,
       isBaseline: item.variant.isBaseline,
       throughput: item.variant.throughput,
+      counters: item.counters.finish(item.trials.length),
     );
   }
 
@@ -536,24 +551,13 @@ abstract final class BenchmarkRunner() {
     }
   }
 
-  static Future<double> _measureVariantBatch(
+  static Future<BatchMeasurement> _measureVariantBatch(
     BenchmarkVariant variant,
     int iterations, {
     required bool isAsync,
-  }) async {
-    if (!isAsync) {
-      final measurement = BatchRunner.runVariantSync(variant, iterations);
-      return measurement.perOpNanoseconds;
-    }
-    final batchStopwatch = Stopwatch()..start();
-    for (var i = 0; i < iterations; i++) {
-      await variant.executeAsync();
-    }
-    batchStopwatch.stop();
-    Blackhole.drain();
-    final elapsedUs = batchStopwatch.elapsedMicroseconds;
-    return (elapsedUs * 1000.0) / iterations;
-  }
+  }) async => isAsync
+      ? await BatchRunner.runVariantAsync(variant, iterations)
+      : BatchRunner.runVariantSync(variant, iterations);
 
   /// Whether trial collection should continue scaling up to
   /// [BenchmarkConfig.maxTrials].
@@ -616,4 +620,34 @@ typedef _PreparedVariant = ({
   WarmupResult warmupResult,
   CalibratedBatch calibrated,
   List<double> trials,
+  _CounterTrials counters,
 });
+
+/// The counter samples of the trials recorded so far, one per trial.
+final class _CounterTrials() {
+  final List<double> _instructions = [];
+  final List<double> _cycles = [];
+
+  /// Records the counts of [measurement], when it has any.
+  void add(BatchMeasurement measurement) {
+    final instructions = measurement.instructionsPerOp;
+    final cycles = measurement.cyclesPerOp;
+    if (instructions == null || cycles == null) return;
+    _instructions.add(instructions);
+    _cycles.add(cycles);
+  }
+
+  /// The samples of [trials] trials, or null unless every trial was counted.
+  CounterSamples? finish(int trials) {
+    final counters = BatchCounters.instance;
+    if (counters == null || trials == 0 || _instructions.length != trials) {
+      return null;
+    }
+    return CounterSamples(
+      source: counters.source,
+      modes: counters.modes,
+      instructionsPerOp: List.unmodifiable(_instructions),
+      cyclesPerOp: List.unmodifiable(_cycles),
+    );
+  }
+}

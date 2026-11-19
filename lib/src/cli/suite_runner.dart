@@ -6,6 +6,7 @@ import 'package:args/args.dart';
 import 'package:io/io.dart';
 import 'package:meta/meta.dart';
 
+import '../batch_runner.dart';
 import '../config.dart';
 import '../harness.dart';
 import '../runner.dart';
@@ -109,6 +110,13 @@ Future<void> mainBenchmarkSuite(Object benchmarks, List<String> args) async {
     ..addFlag(
       'validate',
       help: 'Execute fast smoke check (1 trial, 1 warmup iteration)',
+    )
+    ..addFlag(
+      'counters',
+      defaultsTo: true,
+      help:
+          'Read the hardware counters (instructions retired and CPU cycles) '
+          'around every batch, where the machine has them.',
     );
 
   final cleanArgs = args.isNotEmpty && args.first == '--'
@@ -131,6 +139,7 @@ Future<void> mainBenchmarkSuite(Object benchmarks, List<String> args) async {
 
   final target = parsed.option('target') ?? 'jit';
   final isValidate = parsed.flag('validate');
+  BatchCounters.enabled = parsed.flag('counters');
 
   final benchmarkList = benchmarks is Iterable
       ? List<Object>.from(benchmarks)

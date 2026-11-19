@@ -17,6 +17,17 @@
   `onUnavailable`, where the machine exposes no PMU, the process lacks the
   permission, or the target is JavaScript or WebAssembly.
 
+- Every measurement batch now reads the hardware counters of the process, where
+  `PerfCounters.open` finds any, outside the timed region. Each trial records
+  instructions retired and CPU cycles per operation beside its latency:
+  `BenchmarkResult.counters` and `BenchmarkEntry.counters` hold them as
+  `CounterSamples` (exported from `package:bench_press/bench_press.dart`),
+  serialized under `counters` (`source`, `modes`, `instructions_per_op`,
+  `cycles_per_op`, and with `--processes` `process_mean_instructions` and
+  `process_mean_cycles`). The counts cover every thread of the process, so on
+  JIT they include the compiler and garbage collector threads. Benchmark
+  entrypoints take `--no-counters` to leave the counters closed.
+
 ## 0.4.2
 
 - Added opt-in practical-significance and Schuirmann TOST equivalence gating
