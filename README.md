@@ -324,6 +324,35 @@ executables, `node`, `d8`) in `taskset -c <cpu-list>`:
   outer command with `taskset -c 2 dart run bench_press run --isolate-mode`
   instead.
 
+### Hardware Counters (instructions and cycles)
+
+Wall time moves with everything else the machine is doing. Instructions retired
+barely do, so they separate two variants on a busy laptop where the latency
+interval stays unresolved. Every measurement batch reads the instructions
+retired and the CPU cycles of the process, outside the timed region, where the
+machine offers them:
+
+- **macOS**: `proc_pid_rusage`, with no privilege, user and kernel mode
+  together.
+- **Linux**: `perf_event_open` on every thread, user mode only. The machine
+  needs a PMU (most virtual machines hide it), `kernel.perf_event_paranoid` at
+  `2` or below, and in a container a seccomp profile that allows
+  `perf_event_open`.
+- **JavaScript and WebAssembly**: none.
+
+Reports end with a `### Hardware Counters` table: instructions and cycles per
+operation, instructions per cycle, and the change in instructions against the
+baseline with a 95% Fieller interval. `bench_press diff` adds an
+`#### Instructions per Operation` table. JSON results carry the per-trial
+samples under `counters`.
+
+The counts cover every thread of the process, so on JIT they include the
+compiler and garbage collector threads. Pass `--no-counters` to a benchmark
+entrypoint to leave the counters closed.
+`PerfCounters.open(pids: [...], kernel: true)` reads the same counters of other
+processes, with kernel mode apart on Linux, for harnesses that measure a server
+from outside.
+
 ### CI Integration
 
 ```yaml

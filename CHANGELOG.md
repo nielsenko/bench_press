@@ -28,6 +28,16 @@
   JIT they include the compiler and garbage collector threads. Benchmark
   entrypoints take `--no-counters` to leave the counters closed.
 
+- Reports now show the hardware counter samples: `MarkdownReporter.renderSuite`
+  ends with a `### Hardware Counters` table (also available as
+  `MarkdownReporter.renderCounterTable`) of instructions and cycles per
+  operation, instructions per cycle, and the change in instructions of each
+  candidate against its baseline with a 95% Fieller interval.
+  `MarkdownReporter.renderDeltaTable` (`bench_press diff`, `run --diff`) adds an
+  `#### Instructions per Operation` table for the cells counted in both runs. An
+  interval is withheld while either side's instruction samples spread past 5%,
+  and runs counted in different modes are not compared.
+
 ## 0.4.2
 
 - Added opt-in practical-significance and Schuirmann TOST equivalence gating
