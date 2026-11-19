@@ -4,8 +4,9 @@ Dart and Flutter.
 ## Highlights
 
 - **Multi-Runtime Orchestration**: Run benchmarks across VM JIT (`dart run`),
-  Native AOT (`dart compile exe`), WebAssembly (`dart compile wasm`), and
-  JavaScript (`dart compile js`) with a single command.
+  Native AOT (`dart compile exe`, or a `dart build cli` bundle when a dependency
+  has build hooks), WebAssembly (`dart compile wasm`), and JavaScript
+  (`dart compile js`) with a single command.
 - **Dead Code Elimination (DCE) Barrier**: `Blackhole.consume` prevents
   optimizing compilers from erasing benchmark loops with zero per-iteration heap
   allocations.
