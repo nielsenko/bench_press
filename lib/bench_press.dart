@@ -8,6 +8,7 @@ export 'src/cli/suite_runner.dart'
         mainBenchmarkMatrix,
         mainBenchmarkSuite;
 export 'src/config.dart' show BenchmarkConfig;
+export 'src/counters/perf_counters.dart' show CounterReading, PerfCounters;
 export 'src/harness.dart'
     show
         AsyncBenchmark,

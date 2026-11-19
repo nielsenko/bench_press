@@ -131,6 +131,13 @@ package:bench_press/bench_press.dart:
     new (const constructor: CalibratedBatch Function({required double estimatedOpDurationMicroseconds, required int iterations}))
     estimatedOpDurationMicroseconds (getter: double)
     iterations (getter: int)
+  CounterReading (class extends Object, final):
+    new (const constructor: CounterReading Function({required int cycles, required int instructions, int? kernelCycles, int? kernelInstructions}))
+    cycles (getter: int)
+    instructions (getter: int)
+    kernelCycles (getter: int?)
+    kernelInstructions (getter: int?)
+    toString (method: String Function())
   ElementThroughput (class extends Throughput, final):
     new (const constructor: ElementThroughput Function(int, {String unit}))
     count (getter: int)
@@ -164,6 +171,12 @@ package:bench_press/bench_press.dart:
     upperBound (getter: double)
     toJson (method: Map<String, Object?> Function())
     toString (method: String Function())
+  PerfCounters (class extends Object, abstract, interface):
+    open (static method: PerfCounters? Function({bool kernel, void Function(String)? onUnavailable, List<int>? pids}))
+    modes (getter: String)
+    source (getter: String)
+    close (method: void Function())
+    read (method: CounterReading Function())
   ProcessVarianceComponents (class extends Object, final):
     compute (static method: ProcessVarianceComponents? Function(List<List<double>>))
     new (const constructor: ProcessVarianceComponents Function({required double betweenProcessShare, required double meanTrialsPerProcess, required double msBetween, required double msWithin, required int processes, required double varBetween, required double varWithin}))
