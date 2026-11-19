@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:meta/meta.dart';
 import 'package:path/path.dart' as p;
 
 import 'sdk.dart';
@@ -109,6 +110,26 @@ final class const TargetCompiler({final DartSdk sdk = const DartSdk()}) {
       );
     }
 
+    // `dart compile exe` leaves out the code assets of build hooks, so a
+    // package graph with hooks is built as a `dart build cli` bundle.
+    final hooked = runtime == TargetRuntime.aot
+        ? packagesWithHooks(_packageConfigPath(workingDirectory))
+        : const <String>[];
+    if (hooked.isNotEmpty && compilerFlags.isNotEmpty) {
+      return CompilationResult(
+        success: false,
+        runtime: runtime,
+        sourcePath: normalizedSource,
+        compilationDuration: Duration.zero,
+        stdout: '',
+        stderr:
+            'Error: `dart build cli` takes no compiler flags '
+            '(${compilerFlags.join(' ')}), and `dart compile exe` cannot '
+            'build with the build hooks of ${hooked.join(', ')}.',
+        exitCode: 1,
+      );
+    }
+
     final baseName = p.basenameWithoutExtension(sourceFile.path);
     final (args, artifactPath, runnerPath) = _buildCompilerArgs(
       runtime: runtime,
@@ -116,7 +137,11 @@ final class const TargetCompiler({final DartSdk sdk = const DartSdk()}) {
       outputDir: targetDir.path,
       baseName: baseName,
       extraFlags: compilerFlags,
+      buildCli: hooked.isNotEmpty,
     );
+    // A hook rebuilds its assets from sources this cache does not see, and
+    // `dart build cli` keeps a cache of its own for them.
+    useCache = useCache && hooked.isEmpty;
 
     final expectedRunnerPath = switch (runtime) {
       TargetRuntime.wasm => p.normalize(
@@ -174,7 +199,7 @@ final class const TargetCompiler({final DartSdk sdk = const DartSdk()}) {
           baseName: baseName,
           runnerPath: runnerPath,
         );
-        cacheKeyFile.writeAsStringSync(currentManifest);
+        if (hooked.isEmpty) cacheKeyFile.writeAsStringSync(currentManifest);
       }
 
       return CompilationResult(
@@ -288,10 +313,7 @@ require($encodedCompiledFile);
     }
 
     final baseDir = workingDirectory ?? Directory.current.path;
-    final pkgConfigPath =
-        sdk.packageConfigPath ??
-        p.join(baseDir, '.dart_tool', 'package_config.json');
-    addFileStat('pkgConfig', File(pkgConfigPath));
+    addFileStat('pkgConfig', File(_packageConfigPath(workingDirectory)));
 
     final dartFiles = <String, File>{
       p.normalize(sourceFile.absolute.path): sourceFile,
@@ -305,6 +327,53 @@ require($encodedCompiledFile);
     }
 
     return buffer.toString();
+  }
+
+  /// The package configuration a compilation in [workingDirectory] resolves
+  /// against.
+  String _packageConfigPath(String? workingDirectory) =>
+      sdk.packageConfigPath ??
+      p.join(
+        workingDirectory ?? Directory.current.path,
+        '.dart_tool',
+        'package_config.json',
+      );
+
+  /// The names of the packages in the package configuration at
+  /// [packageConfigPath] that have a build or link hook, sorted.
+  ///
+  /// Empty when the file is missing or is not a package configuration.
+  @visibleForTesting
+  static List<String> packagesWithHooks(String packageConfigPath) {
+    final file = File(packageConfigPath);
+    if (!file.existsSync()) return const [];
+    final Object? config;
+    try {
+      config = jsonDecode(file.readAsStringSync());
+    } on FormatException {
+      return const [];
+    }
+    if (config is! Map<String, Object?>) return const [];
+    final packages = config['packages'];
+    if (packages is! List<Object?>) return const [];
+    final hooked = <String>[];
+    for (final package in packages) {
+      if (package is! Map<String, Object?>) continue;
+      final name = package['name'];
+      final rootUri = package['rootUri'];
+      if (name is! String || rootUri is! String) continue;
+      // A relative root is relative to the directory of the configuration.
+      final root = file.absolute.uri.resolve(
+        rootUri.endsWith('/') ? rootUri : '$rootUri/',
+      );
+      if (root.scheme != 'file') continue;
+      final hooks = Directory.fromUri(root.resolve('hook/'));
+      if (File(p.join(hooks.path, 'build.dart')).existsSync() ||
+          File(p.join(hooks.path, 'link.dart')).existsSync()) {
+        hooked.add(name);
+      }
+    }
+    return hooked..sort();
   }
 
   void _collectDartFiles(Directory dir, Map<String, File> out) {
@@ -366,6 +435,7 @@ try {
     required String outputDir,
     required String baseName,
     required List<String> extraFlags,
+    bool buildCli = false,
   }) {
     final pkgConfig = sdk.packageConfigPath;
     final pkgFlag = pkgConfig != null ? ['--packages=$pkgConfig'] : <String>[];
@@ -373,6 +443,28 @@ try {
     switch (runtime) {
       case TargetRuntime.jit:
         return (<String>[], sourcePath, null);
+
+      case TargetRuntime.aot when buildCli:
+        // `dart build cli` writes `bundle/bin/<name>` with the hooks' code
+        // assets in `bundle/lib/` beside it.
+        final exeExt = Platform.isWindows ? '.exe' : '';
+        final bundleParent = p.normalize(p.join(outputDir, baseName));
+        final outPath = p.join(
+          bundleParent,
+          'bundle',
+          'bin',
+          '$baseName$exeExt',
+        );
+        final args = <String>[
+          'build',
+          'cli',
+          ...pkgFlag,
+          '--target',
+          sourcePath,
+          '--output',
+          bundleParent,
+        ];
+        return (args, outPath, null);
 
       case TargetRuntime.aot:
         final exeExt = Platform.isWindows ? '.exe' : '';

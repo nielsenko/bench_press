@@ -38,6 +38,15 @@
   interval is withheld while either side's instruction samples spread past 5%,
   and runs counted in different modes are not compared.
 
+- `bench_press run -t aot` now builds a `dart build cli` bundle when a package
+  in the dependency graph has a build or link hook, so the benchmark runs with
+  the hooks' code assets beside it. `dart compile exe` refuses such a graph for
+  a file under `bin/` and leaves the assets out elsewhere, which fails at the
+  first native call. A bundle is rebuilt on every run, since `dart build cli`
+  caches the hook outputs itself. Compiler flags (`--compiler-flag`, the `flags`
+  matrix axis) are a compile error with hooks in the graph, since
+  `dart build cli` takes none.
+
 ## 0.4.2
 
 - Added opt-in practical-significance and Schuirmann TOST equivalence gating
