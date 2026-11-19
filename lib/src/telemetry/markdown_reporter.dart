@@ -1,7 +1,9 @@
 import 'dart:io';
 import 'dart:math' as math;
 
+import '../counters/counter_samples.dart';
 import '../stats/fieller.dart';
+import '../stats/metrics.dart';
 import 'plausibility.dart';
 import 'schema.dart';
 
@@ -70,6 +72,7 @@ abstract final class MarkdownReporter() {
     }
 
     buffer.writeln(renderSummaryTable(suite, title: 'All Benchmarks'));
+    _writeCounterTable(buffer, suite);
     return buffer.toString().trimRight();
   }
 
@@ -95,8 +98,157 @@ abstract final class MarkdownReporter() {
     final summaryTitle = groupTables.isNotEmpty ? 'All Benchmarks' : null;
     buffer.writeln(renderSummaryTable(suite, title: summaryTitle));
     _writeUngroupedDriftNotes(buffer, suite);
+    _writeCounterTable(buffer, suite);
     return buffer.toString();
   }
+
+  static void _writeCounterTable(
+    StringBuffer buffer,
+    BenchmarkSuiteResult suite,
+  ) {
+    final table = renderCounterTable(suite);
+    if (table.isEmpty) return;
+    buffer.writeln();
+    buffer.writeln(table);
+  }
+
+  /// Renders the hardware counter samples of [suite]: instructions retired
+  /// and CPU cycles per operation of every benchmark that has them, and how
+  /// the instructions of each candidate compare with its baseline's.
+  ///
+  /// The comparison is the change in mean instructions per operation with a
+  /// 95% Fieller interval, withheld while either side's instruction samples
+  /// spread past [BenchmarkMetrics.maxCvThreshold]. Returns an empty string
+  /// when no benchmark has samples.
+  static String renderCounterTable(
+    BenchmarkSuiteResult suite, {
+    String? title = 'Hardware Counters',
+  }) {
+    if (suite.benchmarks.every((b) => b.counters == null)) return '';
+    final buffer = StringBuffer();
+    if (title != null) {
+      buffer.writeln('### $title');
+      buffer.writeln();
+    }
+    buffer.writeln(
+      '| Benchmark | Target | Instructions/op | Cycles/op | '
+      'Instructions/cycle | vs. Baseline (instructions) | '
+      '95% Confidence Interval |',
+    );
+    buffer.writeln('| :--- | :--- | :---: | :---: | :---: | :---: | :---: |');
+
+    final provenance = <String>{};
+    for (final workload in _groupMatrixByWorkload(suite).entries) {
+      final (workloadName, _, isGroup) = workload.key;
+      final entries = workload.value;
+      final base = entries.firstWhere(
+        (e) => e.isBaseline,
+        orElse: () => entries.first,
+      );
+      for (final entry in [
+        base,
+        ...entries.where((e) => !identical(e, base)),
+      ]) {
+        final counters = entry.counters;
+        if (counters == null) continue;
+        provenance.add(_counterProvenance(counters));
+        final isBase = identical(entry, base);
+        final (delta, interval) = isBase
+            ? (entries.length > 1 ? 'ref' : '-', '-')
+            : _formatCounterComparison(base, entry);
+        final label = isGroup
+            ? '$workloadName / ${_deltaRowLabel(entry)}'
+            : _deltaRowLabel(entry);
+        final cv = (counters.instructionsCv * 100).toStringAsFixed(2);
+        final cols = <String>[
+          isBase && entries.length > 1 ? '$label (Baseline)' : label,
+          '`${entry.target}`',
+          '${_formatCount(counters.meanInstructions)} (±$cv%)',
+          _formatCount(counters.meanCycles),
+          counters.instructionsPerCycle.toStringAsFixed(2),
+          delta,
+          interval,
+        ];
+        buffer.writeln('| ${cols.join(' | ')} |');
+      }
+    }
+    buffer.writeln();
+    buffer.writeln(
+      '> Counted in ${provenance.join(' and in ')}, over every thread of the '
+      'process.',
+    );
+    return buffer.toString().trimRight();
+  }
+
+  static String _counterProvenance(CounterSamples counters) =>
+      '`${counters.modes}` mode by `${counters.source}`';
+
+  /// The change in mean instructions per operation from [base] to [cur] in
+  /// percent, and its 95% Fieller interval.
+  ///
+  /// The change is `-` when the two were counted by different interfaces or
+  /// in different modes. The interval is `[N/A]` while either side is
+  /// unstable, has fewer than two samples or gives no bounded interval.
+  static (String, String) _formatCounterComparison(
+    BenchmarkEntry base,
+    BenchmarkEntry cur, {
+    bool isDelta = false,
+  }) {
+    final baseCounters = base.counters;
+    final curCounters = cur.counters;
+    if (baseCounters == null ||
+        curCounters == null ||
+        baseCounters.source != curCounters.source ||
+        baseCounters.modes != curCounters.modes) {
+      return ('-', '[N/A]');
+    }
+    final delta = _formatCounterPercent(
+      curCounters.meanInstructions / baseCounters.meanInstructions,
+    );
+    final sampleA = curCounters.effectiveInstructions;
+    final sampleB = baseCounters.effectiveInstructions;
+    if (sampleA.length < 2 ||
+        sampleB.length < 2 ||
+        !baseCounters.isStable ||
+        !curCounters.isStable) {
+      return (delta, '[N/A]');
+    }
+    final interval = FiellerInterval.compute(
+      sampleA: sampleA,
+      sampleB: sampleB,
+      paired:
+          !isDelta &&
+          base.processes > 1 &&
+          base.processes == cur.processes &&
+          sampleA.length == sampleB.length &&
+          _sharedProcessLaunchCoordinates(base, cur),
+    );
+    if (!interval.isValid ||
+        interval.lowerBound.isNaN ||
+        interval.upperBound.isNaN) {
+      return (delta, '[N/A]');
+    }
+    return (
+      delta,
+      '[${_formatCounterPercent(interval.lowerBound)}, '
+          '${_formatCounterPercent(interval.upperBound)}]',
+    );
+  }
+
+  /// A ratio of instruction counts as a signed change in percent. Two
+  /// decimals, since instruction counts repeat to a fraction of a percent.
+  static String _formatCounterPercent(double ratio) {
+    final pct = (ratio - 1.0) * 100.0;
+    if (pct.abs() < 0.005) return '0.00%';
+    return '${pct > 0 ? '+' : ''}${pct.toStringAsFixed(2)}%';
+  }
+
+  static String _formatCount(double count) => switch (count) {
+    < 1000.0 => count.toStringAsFixed(1),
+    < 1000000.0 => '${(count / 1000.0).toStringAsFixed(2)}k',
+    < 1000000000.0 => '${(count / 1000000.0).toStringAsFixed(2)}M',
+    _ => '${(count / 1000000000.0).toStringAsFixed(2)}G',
+  };
 
   /// Footnotes drift for cells with no `group` coordinate.
   ///
@@ -642,9 +794,76 @@ abstract final class MarkdownReporter() {
           threshold: threshold,
         ),
       );
+      buffer.write(
+        _renderCounterDeltaRows(
+          pairing.matched,
+          baselineLabel: baselineLabel,
+          currentLabel: currentLabel,
+        ),
+      );
     }
     _writeUnmatchedNotes(buffer, pairing, baselineLabel, currentLabel);
 
+    return buffer.toString();
+  }
+
+  /// The instructions per operation of the pairs in [matched] that both have
+  /// counter samples, or an empty string when none has.
+  static String _renderCounterDeltaRows(
+    List<(BenchmarkEntry, BenchmarkEntry)> matched, {
+    required String baselineLabel,
+    required String currentLabel,
+  }) {
+    final counted = [
+      for (final (base, cur) in matched)
+        if (base.counters != null && cur.counters != null) (base, cur),
+    ];
+    if (counted.isEmpty) return '';
+    final buffer = StringBuffer()
+      ..writeln()
+      ..writeln('#### Instructions per Operation')
+      ..writeln()
+      ..writeln(
+        '| Benchmark | Target | $baselineLabel | $currentLabel | Delta (%) | '
+        '95% CI (Fieller) |',
+      )
+      ..writeln('| :--- | :--- | :---: | :---: | :---: | :---: |');
+    final provenance = <String>{};
+    var mismatched = false;
+    for (final (base, cur) in counted) {
+      final baseCounters = base.counters!;
+      final curCounters = cur.counters!;
+      provenance
+        ..add(_counterProvenance(baseCounters))
+        ..add(_counterProvenance(curCounters));
+      final (delta, interval) = _formatCounterComparison(
+        base,
+        cur,
+        isDelta: true,
+      );
+      if (delta == '-') mismatched = true;
+      final cols = <String>[
+        _deltaRowLabel(cur),
+        '`${cur.target}`',
+        _formatCount(baseCounters.meanInstructions),
+        _formatCount(curCounters.meanInstructions),
+        delta,
+        interval,
+      ];
+      buffer.writeln('| ${cols.join(' | ')} |');
+    }
+    buffer
+      ..writeln()
+      ..writeln(
+        '> Counted in ${provenance.join(' and in ')}, over every thread of '
+        'the process.',
+      );
+    if (mismatched) {
+      buffer.writeln(
+        '> Runs counted by different interfaces or in different modes are '
+        'not compared.',
+      );
+    }
     return buffer.toString();
   }
 
